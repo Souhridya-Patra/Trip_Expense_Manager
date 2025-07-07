@@ -207,9 +207,22 @@ function App() {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-4">
       <div className="max-w-4xl mx-auto">
         {/* Header */}
-        <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-gray-800 mb-2">Travel Expense Manager</h1>
-          <p className="text-gray-600">Split expenses fairly among travelers with individual food tracking</p>
+        <div className="relative mb-8">
+          {/* Logo and company name in top-left */}
+          <div className="absolute left-0 top-0 flex flex-col items-start">
+            <img
+              src="/assets/S_Logo.png"
+              alt="App Logo"
+              width={80}
+              className="mb-1"
+            />
+            <span className="text-xs text-gray-500 font-semibold pl-1">SP ByteVerse Pvt. Ltd.</span>
+          </div>
+          {/* App title and subtitle centered */}
+          <div className="flex flex-col items-center">
+            <h1 className="text-4xl font-bold text-gray-800 mb-2">Travel Expense Manager</h1>
+            <p className="text-gray-600">Split expenses fairly among travelers with individual food tracking</p>
+          </div>
         </div>
 
         {/* Setup Section */}
