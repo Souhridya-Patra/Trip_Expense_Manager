@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Users, Receipt, Calculator, Trash2, Edit3, Check, X, UtensilsCrossed, DollarSign } from 'lucide-react';
+import { Plus, Users, Receipt, Calculator, Trash2, Edit3, UtensilsCrossed, DollarSign, ScanLine } from 'lucide-react';
 
 interface Expense {
   id: string;
@@ -16,6 +16,13 @@ interface Settlement {
   amount: number;
 }
 
+interface ReceiptItem {
+  id: string;
+  name: string;
+  amount: number;
+  assignedTo?: string;
+}
+
 function App() {
   const [totalPeople, setTotalPeople] = useState<number>(0);
   const [payers, setPayers] = useState<string[]>([]);
@@ -26,6 +33,13 @@ function App() {
   const [editingExpense, setEditingExpense] = useState<string | null>(null);
   const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [showResults, setShowResults] = useState(false);
+  const [receiptImage, setReceiptImage] = useState<File | null>(null);
+  const [receiptPreviewUrl, setReceiptPreviewUrl] = useState<string | null>(null);
+  const [ocrStatus, setOcrStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [ocrProgress, setOcrProgress] = useState(0);
+  const [ocrText, setOcrText] = useState('');
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  const [receiptItems, setReceiptItems] = useState<ReceiptItem[]>([]);
 
   // Update all people list when total people changes
   useEffect(() => {
@@ -44,6 +58,14 @@ function App() {
     });
     setFoodOrders(newFoodOrders);
   }, [totalPeople, payers]);
+
+  useEffect(() => {
+    return () => {
+      if (receiptPreviewUrl) {
+        URL.revokeObjectURL(receiptPreviewUrl);
+      }
+    };
+  }, [receiptPreviewUrl]);
 
   // Add a new payer
   const addPayer = () => {
@@ -74,6 +96,204 @@ function App() {
       ...foodOrders,
       [person]: amount
     });
+  };
+
+  const suggestPersonForItem = (label: string) => {
+    const normalized = label.toLowerCase();
+    for (const person of allPeople) {
+      const personKey = person.toLowerCase();
+      if (normalized.includes(`@${personKey}`) || normalized.includes(`#${personKey}`) || normalized.includes(personKey)) {
+        return person;
+      }
+    }
+    return '';
+  };
+
+  const parseReceiptText = (text: string) => {
+    const lines = text
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+    const excludedTokens = [
+      'subtotal', 'total', 'tax', 'tip', 'amount', 'balance', 'cash', 'change', 'card',
+      'visa', 'mastercard', 'amex', 'gratuity', 'service', 'rounding', 'discount',
+      'coupon', 'member', 'loyalty', 'order', 'server', 'table', 'check', 'receipt',
+      'invoice', 'item count', 'items', 'qty', 'quantity', 'price', 'unit', 'vat',
+      'gst', 'sgst', 'cgst', 'igst', 'paymode', 'received', 'net amount', 'round off',
+      'bill', 'balance', 'payment', 'refund', 'dine in', 'served', 'cover', 'cashier',
+      'tax summary', 'inclusive', 'change', 'myr', 'prn', 'now', 'i/c', 'prun'
+    ];
+    const headerPattern = /(product|item)\s+name|product name|item name/i;
+    const columnPattern = /(qty|quantity|mrp|rate|price|amount)/i;
+
+    const cleanItemName = (raw: string) => {
+      return raw
+        .replace(/^[*#\-]+\s*/g, '')
+        .replace(/\b\d+\s*x\b/gi, '')
+        .replace(/\bqty\s*:?\s*\d+\b/gi, '')
+        .replace(/^\d+\.\d+\s*/g, '')
+        .replace(/^\d+\s+/g, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+    };
+
+    const isLikelyItemLine = (label: string, amountText: string) => {
+      const lower = label.toLowerCase();
+      if (excludedTokens.some(token => lower.includes(token))) return false;
+      if (/^\d+$/.test(label)) return false;
+      if (label.length < 2) return false;
+      if (/\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b/.test(label)) return false;
+      if (/\b\d{2}:\d{2}\b/.test(label)) return false;
+      if (/\b(auth|approval|transaction|terminal|merchant|ref|trace|phone|ph)\b/i.test(label)) return false;
+      if (/%/.test(amountText)) return false;
+      return true;
+    };
+
+    const extractAmountFromLine = (line: string) => {
+      const matches = line.match(/[\d.]+/g) || [];
+      if (matches.length === 0) return null;
+      for (let i = matches.length - 1; i >= 0; i--) {
+        const amt = parseFloat(matches[i]);
+        if (amt > 0.5 && amt < 100000) {
+          return amt;
+        }
+      }
+      return null;
+    };
+
+    const parseLines = (requireSection: boolean) => {
+      let inItemsSection = !requireSection;
+      const items: ReceiptItem[] = [];
+      const seenNames = new Set<string>();
+
+      lines.forEach((line, index) => {
+        const lower = line.toLowerCase();
+        if (requireSection && !inItemsSection && headerPattern.test(line) && columnPattern.test(line)) {
+          inItemsSection = true;
+          return;
+        }
+
+        if (!inItemsSection) return;
+
+        if (excludedTokens.some(token => lower.includes(token))) {
+          if (items.length > 0) {
+            inItemsSection = false;
+          }
+          return;
+        }
+
+        const numericMatches = line.match(/[0-9]+(?:\.[0-9]{1,2})?/g) || [];
+        if (numericMatches.length < 2) return;
+
+        const firstNumberIndex = line.search(/[0-9]/);
+        if (firstNumberIndex === -1) return;
+        const rawName = line.slice(0, firstNumberIndex).replace(/[*#]/g, '').trim();
+        const name = cleanItemName(rawName);
+        const amount = extractAmountFromLine(line);
+        if (!name || !amount || amount <= 0) return;
+        if (!isLikelyItemLine(name, amount.toString())) return;
+        if (seenNames.has(name.toLowerCase())) return;
+        seenNames.add(name.toLowerCase());
+
+        items.push({
+          id: `${Date.now()}-${index}`,
+          name,
+          amount,
+          assignedTo: suggestPersonForItem(name) || undefined
+        });
+      });
+
+      return items;
+    };
+
+    const sectionItems = parseLines(true);
+    if (sectionItems.length > 0) {
+      return sectionItems;
+    }
+
+    return parseLines(false);
+  };
+
+  const handleReceiptImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (receiptPreviewUrl) {
+      URL.revokeObjectURL(receiptPreviewUrl);
+    }
+    const previewUrl = URL.createObjectURL(file);
+    setReceiptImage(file);
+    setReceiptPreviewUrl(previewUrl);
+    setOcrText('');
+    setReceiptItems([]);
+    setOcrStatus('idle');
+    setOcrError(null);
+  };
+
+  const runOcr = async () => {
+    if (!receiptImage) return;
+    setOcrStatus('running');
+    setOcrError(null);
+    setOcrProgress(0);
+    try {
+      const { createWorker } = await import('tesseract.js');
+      const worker = await createWorker('eng', 1, {
+        logger: (message) => {
+          if (message.status === 'recognizing text') {
+            setOcrProgress(Math.round((message.progress || 0) * 100));
+          }
+        },
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0/tesseract-core.wasm.js',
+        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.0.5/dist/worker.min.js'
+      });
+      const { data } = await worker.recognize(receiptImage);
+      await worker.terminate();
+      const text = data.text || '';
+      setOcrText(text);
+      setOcrStatus('done');
+      setReceiptItems(parseReceiptText(text));
+    } catch (error) {
+      setOcrStatus('error');
+      setOcrError('Failed to read the receipt. Try a clearer image or paste the text below.');
+      setOcrProgress(0);
+    }
+  };
+
+  const handleParseReceiptText = () => {
+    setReceiptItems(parseReceiptText(ocrText));
+  };
+
+  const updateReceiptItem = (id: string, updates: Partial<ReceiptItem>) => {
+    setReceiptItems(items => items.map(item => (item.id === id ? { ...item, ...updates } : item)));
+  };
+
+  const applyParsedItemsToFoodExpense = () => {
+    if (receiptItems.length === 0) return;
+    const totalsByPerson: { [person: string]: number } = {};
+    allPeople.forEach(person => {
+      totalsByPerson[person] = 0;
+    });
+
+    receiptItems.forEach(item => {
+      if (item.assignedTo && totalsByPerson[item.assignedTo] !== undefined) {
+        totalsByPerson[item.assignedTo] += item.amount;
+      }
+    });
+
+    const updatedFoodOrders: { [person: string]: string } = {};
+    allPeople.forEach(person => {
+      const total = totalsByPerson[person];
+      updatedFoodOrders[person] = total > 0 ? total.toFixed(2) : '';
+    });
+
+    const totalAmount = receiptItems.reduce((sum, item) => sum + item.amount, 0);
+    setNewExpense({
+      description: 'Receipt - Food',
+      amount: totalAmount > 0 ? totalAmount.toFixed(2) : '',
+      paidBy: newExpense.paidBy || payers[0] || '',
+      type: 'food'
+    });
+    setFoodOrders(updatedFoodOrders);
   };
 
   // Add expense
@@ -198,6 +418,8 @@ function App() {
   const totalRegularExpenses = regularExpenses.reduce((sum, expense) => sum + expense.amount, 0);
   const totalFoodExpenses = foodExpenses.reduce((sum, expense) => sum + expense.amount, 0);
   const perPersonRegularShare = totalPeople > 0 ? totalRegularExpenses / totalPeople : 0;
+  const receiptItemsTotal = receiptItems.reduce((sum, item) => sum + item.amount, 0);
+  const assignedItemsTotal = receiptItems.reduce((sum, item) => sum + (item.assignedTo ? item.amount : 0), 0);
 
   const getTotalFoodOrdersAmount = () => {
     return Object.values(foodOrders).reduce((sum, amount) => sum + (parseFloat(amount) || 0), 0);
@@ -275,6 +497,140 @@ function App() {
             </div>
           </div>
         </div>
+
+        {/* Receipt Scan Section */}
+        {payers.length > 0 && (
+          <div className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 shadow-xl border border-white/20 mb-6">
+            <h2 className="text-2xl font-semibold text-gray-800 mb-2 flex items-center gap-2">
+              <ScanLine className="w-6 h-6 text-purple-600" />
+              Receipt Scan (Beta)
+            </h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Upload or snap a receipt and let OCR auto-fill line items. Add tags like @Alex or #Sam in the text to suggest who ordered what.
+            </p>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Receipt Image</label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleReceiptImageChange}
+                  className="block w-full text-sm text-gray-600 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-purple-600 file:text-white hover:file:bg-purple-700"
+                />
+                {receiptPreviewUrl && (
+                  <img
+                    src={receiptPreviewUrl}
+                    alt="Receipt preview"
+                    className="mt-3 w-full max-h-64 object-contain rounded-lg border border-gray-200"
+                  />
+                )}
+                <button
+                  onClick={runOcr}
+                  disabled={!receiptImage || ocrStatus === 'running'}
+                  type="button"
+                  className="mt-3 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {ocrStatus === 'running' ? 'Scanning...' : 'Run OCR'}
+                </button>
+                {ocrStatus === 'running' && (
+                  <p className="mt-2 text-sm text-gray-600">Progress: {ocrProgress}%</p>
+                )}
+                {ocrStatus === 'error' && ocrError && (
+                  <p className="mt-2 text-sm text-red-600">{ocrError}</p>
+                )}
+                {ocrStatus === 'done' && (
+                  <p className="mt-2 text-sm text-green-600">OCR complete. Review the text and parsed items.</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Receipt Text</label>
+                <textarea
+                  value={ocrText}
+                  onChange={(e) => setOcrText(e.target.value)}
+                  rows={10}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
+                  placeholder="Paste receipt text here if OCR is unavailable"
+                />
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    onClick={handleParseReceiptText}
+                    type="button"
+                    className="px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition-all"
+                  >
+                    Parse Line Items
+                  </button>
+                  <button
+                    onClick={() => {
+                      setOcrText('');
+                      setReceiptItems([]);
+                    }}
+                    type="button"
+                    className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-all"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {receiptItems.length > 0 && (
+              <div className="mt-6">
+                <h3 className="text-lg font-semibold text-gray-800 mb-3">Detected Line Items</h3>
+                <div className="space-y-2">
+                  {receiptItems.map((item) => (
+                    <div key={item.id} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
+                      <input
+                        type="text"
+                        value={item.name}
+                        onChange={(e) => updateReceiptItem(item.id, { name: e.target.value, assignedTo: item.assignedTo || suggestPersonForItem(e.target.value) || undefined })}
+                        className="md:col-span-6 px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                      />
+                      <input
+                        type="number"
+                        value={item.amount}
+                        onChange={(e) => updateReceiptItem(item.id, { amount: parseFloat(e.target.value) || 0 })}
+                        className="md:col-span-3 px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                        step="0.01"
+                      />
+                      <select
+                        value={item.assignedTo || ''}
+                        onChange={(e) => updateReceiptItem(item.id, { assignedTo: e.target.value || undefined })}
+                        className="md:col-span-3 px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                      >
+                        <option value="">Unassigned</option>
+                        {allPeople.map((person) => (
+                          <option key={person} value={person}>{person}</option>
+                        ))}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-3 p-3 bg-purple-50 rounded-lg border border-purple-200">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">Items total:</span>
+                    <span className="font-semibold text-gray-800">${receiptItemsTotal.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">Assigned total:</span>
+                    <span className="font-semibold text-gray-800">${assignedItemsTotal.toFixed(2)}</span>
+                  </div>
+                </div>
+
+                <button
+                  onClick={applyParsedItemsToFoodExpense}
+                  type="button"
+                  className="mt-3 px-5 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all"
+                >
+                  Use for Food Expense
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Add Expense Section */}
         {payers.length > 0 && (
