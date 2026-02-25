@@ -1,39 +1,3 @@
-# Trip Expense Manager
-
-Travel Expense Manager is a simple React app for splitting trip costs, with special handling for food orders so each person pays only for what they ate.
-
-## Features
-- Split regular expenses equally across all travelers.
-- Track food expenses by individual orders and validate order totals.
-- Keep a list of payers and rename travelers on the fly.
-- View totals for regular vs food expenses.
-- Calculate who owes whom with a settlement summary.
-
-## Getting Started
-### Prerequisites
-- Node.js 18+ (or newer)
-- npm
-
-### Install
-```bash
-npm install
-```
-
-### Run the app
-```bash
-npm run dev
-```
-
-Then open the local URL shown in the terminal.
-
-## Usage
-1. Enter the total number of travelers.
-2. Add and rename payers (these names are used everywhere in the app).
-3. Add expenses:
-	- Regular: split equally among all travelers.
-	- Food: enter each person's order amount; the total must match the expense amount.
-4. Review the totals and click "Calculate Settlements" to see who owes whom.
-
 # 🏕️ Trip Expense Manager
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
