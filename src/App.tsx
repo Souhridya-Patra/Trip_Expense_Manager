@@ -433,7 +433,7 @@ function App() {
           {/* Logo and company name in top-left */}
           <div className="absolute left-0 top-0 flex flex-col items-start">
             <img
-              src="/assets/S_Logo.png"
+              src="assets/S_Logo.png"
               alt="App Logo"
               width={80}
               className="mb-1"
